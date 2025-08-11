@@ -2,11 +2,15 @@ import logging
 import os
 import json
 from datetime import datetime
+import streamlit as st
 from typing import Dict
 from openai import OpenAI
 from database import EmbeddingDatabase
 from utils import get_openai_embedding
 from dotenv import load_dotenv
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+
 
 load_dotenv()
 
@@ -21,12 +25,27 @@ openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 class CompanyChatbot:
-    def __init__(self, db_path="embeddings_db", model="gpt-4-turbo", top_k=6):
+    def _init_(self, db_path="embeddings_db", model="gpt-4-turbo", top_k=6):
         self.db = EmbeddingDatabase(db_path)
         self.model = model
         self.top_k = top_k
         self.log_dir = "chat_logs"
         os.makedirs(self.log_dir, exist_ok=True)
+
+        
+        # --- GOOGLE SHEETS SETUP ---
+        service_account_info = json.loads(st.secrets["GSHEET_SERVICE_ACCOUNT_JSON"])
+
+       
+        SPREADSHEET_ID = st.secrets["GSHEET_SPREADSHEET_ID"]
+
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = service_account.Credentials.from_service_account_info(
+            service_account_info, scopes=scopes
+        )
+        self.sheets_service = build('sheets', 'v4', credentials=creds)
+        self.sheet_id = SPREADSHEET_ID
+        self.sheet_name = "Logs"  # Sheet tab name to append logs
 
     def ask_question(self, user_query: str) -> Dict:
         return self._ask(user_query)
@@ -62,25 +81,29 @@ class CompanyChatbot:
         context_text += "[END DOCUMENT EXCERPTS]"
 
         # Step 3: JSON Extraction Prompt
+        # --- extraction prompt ---
         extraction_prompt = (
             "You are an information extraction assistant for the company ProGlove.\n\n"
-            "From the provided context, EXTRACT information and OUTPUT VALID JSON ONLY. "
-            "The JSON MUST EXACTLY follow the schema below and must be the only content in the response.\n\n"
+            "From the provided context, extract ALL facts that could plausibly help answer the user's question, "
+            "even if some details are unclear. OUTPUT VALID JSON ONLY in the format below.\n\n"
             "JSON schema (exact keys):\n"
             "{\n"
             '  "proglove_facts": [ { "text": "...", "source": "PDF name (pN)" }, ... ],\n'
             '  "other_companies": [ { "name": "...", "role": "customer|partner|collaborator|case study subject|relationship unknown", "source": "PDF name (pN)" }, ... ],\n'
-            '  "people": [ { "name": "...", "role": "...|role unknown", "company": "...|company unknown", "source": "PDF name (pN)" }, ... ]\n'
+            '  "people": [ { "name": "...", "role": "role specified|role unknown", "company": "company specified|company unknown", "source": "PDF name (pN)" }, ... ]\n'
             "}\n\n"
             "Rules:\n"
-            "- Output valid JSON only — no commentary.\n"
-            "- Always extract all facts directly stated in the context. Do not skip partial or indirect mentions.\n"
-            "- Always include the exact PDF filename and page number in the 'source' field.\n"
-            "- If a company's role is not clear, use 'relationship unknown'.\n"
-            "- If a person’s role or company is not stated, use 'role unknown' / 'company unknown'.\n"
-            "- Always list companies and people even if ProGlove is not mentioned in the same sentence.\n"
-            "- Never merge separate facts; keep each fact as a separate object.\n"
-            "- Do not infer beyond what is explicitly stated, but do capture all relevant entities mentioned.\n"
+            "- Always include any fact that may be relevant — even if incomplete.\n"
+            "- If the role or company is unclear, use 'role unknown' or 'company unknown' instead of leaving it out.\n"
+            "- Keep each fact separate — do not merge multiple into one object.\n"
+            "- Always include the exact PDF filename and page number in the 'source'.\n"
+            "- Do not guess beyond the provided context.\n"
+            "- If truly nothing in the context relates to the user's question, return exactly:\n"
+            "{\n"
+            '  "proglove_facts": [],\n'
+            '  "other_companies": [],\n'
+            '  "people": []\n'
+            "}\n"
         )
 
 
@@ -111,21 +134,22 @@ class CompanyChatbot:
             return {"answer": f"Error extracting facts: {e}", "sources": pdf_sources}
 
         # Step 4: Final user-facing rewrite
+        # --- final prompt ---
         final_prompt = (
-            "You are a helpful assistant for the company ProGlove. "
-            "You will be given a JSON object (from the extractor) with three sections: proglove_facts, other_companies, and people. "
-            "DO NOT output or repeat the JSON. Use the JSON only as your source of truth to write a single concise, natural-language answer to the user's question.\n\n"
+            "You are a helpful assistant for the company ProGlove.\n"
+            "You will be given a JSON object (from the extractor) with three sections: proglove_facts, other_companies, and people.\n\n"
+            "Write a clear, concise, natural-sounding answer to the user's question using ONLY the facts in the JSON.\n"
+            "Do not show or mention the JSON itself.\n\n"
             "Rules:\n"
-            "- Always address every part of the user's question explicitly.\n"
-            "- While answering the user, Focus on the most relevant facts to answer the question.\n"
-            "- Focus on ProGlove first. If other companies are relevant, state their relationship using exactly the value from 'role'.\n"
-            "- When mentioning people, include their role and company from the JSON; if unknown, say 'role not specified' or 'company not specified'.\n"
-            "- If a company is not the manufacturer, clearly say 'No, [Company] is not the manufacturer; they are a [role].'\n"
-            "- Always include the PDF filename and page number in parentheses after each fact.\n"
-            "- Be concise but cover all unique facts; avoid repeating the same fact in different sentences.\n"
-            "- If the JSON is completely empty, say 'Sorry I dont have an answer to that rightnow, my memory and learning capabilities are limited yet.' \n"
+            "- Address the user's question directly, using any relevant facts from the JSON.\n"
+            "- Prioritize ProGlove facts first.\n"
+            "- Mention other companies only if relevant to the question, stating their role exactly as given (even if 'relationship unknown').\n"
+            "- Mention people only if relevant, including role/company if given; otherwise say 'role not specified' or 'company not specified'.\n"
+            "- Include the PDF filename and page number in parentheses after each fact.\n"
+            "- If all three sections are empty, respond exactly:\n"
+            "  'I couldn't find that in the documents.'\n"
+            "- Write in a friendly, human tone — avoid robotic phrasing.\n"
         )
-
 
         try:
             final_response = openai.chat.completions.create(
@@ -144,10 +168,15 @@ class CompanyChatbot:
         # Step 5: Log interaction
         self._log_interaction(user_query, context_text, final_answer)
 
+        # Remove references if fallback answer is given
+        if final_answer == "Sorry I don't have an answer to that right now, my memory and learning capabilities are limited yet.":
+            pdf_sources = []
+
         return {
             "answer": final_answer,
             "sources": pdf_sources
         }
+
 
     def _log_interaction(self, query: str, context: str, response: str):
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -162,6 +191,20 @@ class CompanyChatbot:
             logging.info(f"Chat interaction logged to {log_path}")
         except Exception as e:
             logging.error(f"Failed to write chat log: {e}")
+
+        try:
+            values = [[timestamp, query, response]]
+            body = {'values': values}
+            self.sheets_service.spreadsheets().values().append(
+                spreadsheetId=self.sheet_id,
+                range=f"{self.sheet_name}!A:C",
+                valueInputOption="USER_ENTERED",
+                insertDataOption="INSERT_ROWS",
+                body=body
+            ).execute()
+            logging.info("Logged interaction to Google Sheets")
+        except Exception as e:
+            logging.error(f"Failed to log interaction to Google Sheets: {e}")
 
     def get_database_info(self) -> Dict:
         pdf_names = self.db.get_all_pdf_names()

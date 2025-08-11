@@ -61,7 +61,7 @@ def process_pdf(file_path, save_json=True, db_path="embeddings_db"):
     return db.get_database_stats()
 
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     db_path = "embeddings_db"
     db = EmbeddingDatabase(db_path)
 
