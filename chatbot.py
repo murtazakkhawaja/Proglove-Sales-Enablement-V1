@@ -32,11 +32,9 @@ class CompanyChatbot:
         self.log_dir = "chat_logs"
         os.makedirs(self.log_dir, exist_ok=True)
 
-        
         # --- GOOGLE SHEETS SETUP ---
         service_account_info = json.loads(st.secrets["GSHEET_SERVICE_ACCOUNT_JSON"])
 
-       
         SPREADSHEET_ID = st.secrets["GSHEET_SPREADSHEET_ID"]
 
         scopes = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -81,7 +79,6 @@ class CompanyChatbot:
         context_text += "[END DOCUMENT EXCERPTS]"
 
         # Step 3: JSON Extraction Prompt
-        # --- extraction prompt ---
         extraction_prompt = (
             "You are an information extraction assistant for the company ProGlove.\n\n"
             "From the provided context, extract ALL facts that could plausibly help answer the user's question, "
@@ -134,7 +131,6 @@ class CompanyChatbot:
             return {"answer": f"Error extracting facts: {e}", "sources": pdf_sources}
 
         # Step 4: Final user-facing rewrite
-        # --- final prompt ---
         final_prompt = (
             "You are a helpful assistant for the company ProGlove.\n"
             "You will be given a JSON object (from the extractor) with three sections: proglove_facts, other_companies, and people.\n\n"
